@@ -4,19 +4,23 @@ import { APP_PIPE } from '@nestjs/core';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { z } from 'zod';
 
-import { DownloadController } from '@/controllers/download';
-import { InfosController } from '@/controllers/infos';
+import { DownloadController } from '@/controllers/downloads';
+import { PluginsController } from '@/controllers/plugins';
 import { EnvironmentVariables } from '@/environment';
-import { DownloadsGateway } from '@/gateways/downloads.gateway';
+import { GlobalGateway } from '@/gateways';
+import { DownloadGateway } from '@/gateways/protocols/download/service';
+import { SettingsService } from '@/gateways/protocols/settings/service';
+import { UploadService } from '@/gateways/protocols/upload/service';
 import { HealthModule } from '@/modules/health/health.module';
-import { downloadEngineProvider } from '@/providers/download-engine';
+import { downloadEngineProvider, stateStoreProvider } from '@/providers/download-engine';
 import { pluginRegistryProvider } from '@/providers/plugin-registry';
 import { DownloadEventEmitter } from '@/services/download-events';
+import { PushSessionManager } from '@/services/push-session-manager';
 
 export const configSchema = z.object({
   server: z.object({
     port: z.number().optional().default(3000),
-    apiKey: z.string().uuid(),
+    apiKey: z.guid(),
     logLevel: z.enum(['error', 'warn', 'info', 'verbose', 'debug', 'silly']).optional().default('info'),
   }),
   downloadsPath: z.string(),
@@ -30,12 +34,17 @@ export type Config = z.infer<typeof configSchema>;
 export function configureAppModule(env: EnvironmentVariables): new () => NestModule {
   @Module({
     imports: [ConfigModule.forRoot({ load: [() => env] }), HealthModule],
-    controllers: [DownloadController, InfosController],
+    controllers: [DownloadController, PluginsController],
     providers: [
+      GlobalGateway,
       DownloadEventEmitter,
+      PushSessionManager,
       pluginRegistryProvider,
+      stateStoreProvider,
       downloadEngineProvider,
-      DownloadsGateway,
+      UploadService,
+      SettingsService,
+      DownloadGateway,
       {
         provide: APP_PIPE,
         useClass: ZodValidationPipe,

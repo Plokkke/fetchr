@@ -1,19 +1,22 @@
 import { Readable } from 'stream';
 
+import { DownloadItem } from '@/schemas/DownloadItem';
+import { RequestContext } from '@/services/request-context';
+
 export type FileInfo = {
   fileName: string;
   size: number | null;
 };
 
-export type DownloadStream = {
-  infos: FileInfo;
-  stream: Readable;
-};
+export interface ResolvedSource {
+  readonly infos: FileInfo;
+  open(): Promise<Readable>;
+  close?(): Promise<void>;
+}
 
 export interface HostPlugin {
   readonly name: string;
   readonly urlPattern: string;
   canHandle(url: string): boolean;
-  getFileInfo(url: string): Promise<FileInfo>;
-  download(url: string): Promise<DownloadStream>;
+  resolve(item: DownloadItem, ctx?: RequestContext): Promise<ResolvedSource>;
 }

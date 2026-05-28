@@ -38,14 +38,14 @@
     "lodash": "^4.17.21",
     "luxon": "^3.7.2",
     "nest-winston": "^1.10.2",
-    "nestjs-zod": "^4.3.1",
+    "nestjs-zod": "^5.2.1",
     "reflect-metadata": "^0.2.2",
-    "unrar-async": "^3.0.0",
+    "unrar-async": "^3.1.0",
     "uuid": "^11.1.0",
     "winston": "^3.18.3",
     "ws": "^8.20.0",
     "yauzl": "^3.2.1",
-    "zod": "^3.25.76"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.10",

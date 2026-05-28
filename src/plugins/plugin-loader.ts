@@ -1,24 +1,32 @@
 import { Logger } from '@nestjs/common';
 
 import { ArchivePlugin } from '@/plugins/archive-plugin';
+import { FetchrPushHostPlugin } from '@/plugins/built-in/fetchr-push.host';
 import { OneFichierHostPlugin } from '@/plugins/built-in/one-fichier.host';
 import { RarArchivePlugin } from '@/plugins/built-in/rar.archive';
 import { ZipArchivePlugin } from '@/plugins/built-in/zip.archive';
 import { HostPlugin } from '@/plugins/host-plugin';
+import { PushSessionManager } from '@/services/push-session-manager';
 
 const logger = new Logger('PluginLoader');
 
-type BuiltInHostFactory = (env: Record<string, string | undefined>) => HostPlugin;
+export type HostPluginContext = {
+  env: Record<string, string | undefined>;
+  pushSessionManager: PushSessionManager;
+};
+
+type BuiltInHostFactory = (ctx: HostPluginContext) => HostPlugin;
 type BuiltInArchiveFactory = () => ArchivePlugin;
 
 const BUILT_IN_HOSTS: Record<string, BuiltInHostFactory> = {
-  'one-fichier': (env) => {
+  'one-fichier': ({ env }) => {
     const host = env.ONE_FICHIER_HOST;
     if (!host) {
       throw new Error('Plugin one-fichier requires ONE_FICHIER_HOST environment variable');
     }
     return new OneFichierHostPlugin({ host, apiKey: env.ONE_FICHIER_API_KEY });
   },
+  'fetchr-push': ({ pushSessionManager }) => new FetchrPushHostPlugin(pushSessionManager),
 };
 
 const BUILT_IN_ARCHIVES: Record<string, BuiltInArchiveFactory> = {
@@ -36,13 +44,13 @@ async function loadExternalPlugin<T>(packageName: string): Promise<T> {
   return factory() as T;
 }
 
-export async function loadHostPlugins(names: string[], env: Record<string, string | undefined>): Promise<HostPlugin[]> {
+export async function loadHostPlugins(names: string[], ctx: HostPluginContext): Promise<HostPlugin[]> {
   const plugins: HostPlugin[] = [];
 
   for (const name of names) {
     const builtIn = BUILT_IN_HOSTS[name];
     if (builtIn) {
-      plugins.push(builtIn(env));
+      plugins.push(builtIn(ctx));
       logger.log(`Loaded built-in host plugin: ${name}`);
     } else {
       plugins.push(await loadExternalPlugin<HostPlugin>(name));

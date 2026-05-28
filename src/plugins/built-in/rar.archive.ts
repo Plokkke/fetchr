@@ -1,8 +1,7 @@
-import * as fs from 'node:fs';
 import { Readable } from 'stream';
 
 import { Logger } from '@nestjs/common';
-import { RaRExtractor } from 'unrar-async';
+import { RARExtractor } from 'unrar-async';
 
 import { ArchivePlugin, ExtractedFile, ExtractionResult } from '@/plugins/archive-plugin';
 
@@ -14,12 +13,14 @@ export class RarArchivePlugin implements ArchivePlugin {
   private readonly logger = new Logger(RarArchivePlugin.name);
 
   canHandle(header: Buffer): boolean {
-    if (header.length < 7) return false;
+    if (header.length < 7) {
+      return false;
+    }
     return header.subarray(0, 7).equals(RAR4_MAGIC) || (header.length >= 8 && header.subarray(0, 8).equals(RAR5_MAGIC));
   }
 
   async extract(filePath: string): Promise<ExtractionResult> {
-    const extractor = await RaRExtractor.fromStream(fs.createReadStream(filePath));
+    const extractor = await RARExtractor.fromFile(filePath);
     const { totalSize, files } = await extractor.extract();
 
     this.logger.log(`RAR archive: ${(totalSize / 1024 / 1024).toFixed(1)} MB total`);
@@ -35,11 +36,13 @@ export class RarArchivePlugin implements ArchivePlugin {
       fileHeader: { name: string; unpSize: number; flags: { directory: boolean } };
       extraction?: Readable;
     }>,
-    extractor: RaRExtractor,
+    extractor: RARExtractor,
   ): AsyncIterable<ExtractedFile> {
     try {
       for await (const { fileHeader, extraction } of files) {
-        if (fileHeader.flags.directory || !extraction) continue;
+        if (fileHeader.flags.directory || !extraction) {
+          continue;
+        }
         yield {
           name: fileHeader.name,
           size: fileHeader.unpSize,

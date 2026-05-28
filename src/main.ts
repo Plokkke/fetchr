@@ -4,8 +4,10 @@ import { WinstonModule } from 'nest-winston';
 
 import { configureAppModule } from '@/app.module';
 import { loadEnv } from '@/environment';
+import { installShutdownHandlers } from '@/helpers/shutdown';
 import { LoggingInterceptor } from '@/interceptors/logging';
 import { logger } from '@/services/logger';
+import { StateStore } from '@/services/state-store';
 
 (async () => {
   const env = loadEnv();
@@ -18,6 +20,17 @@ import { logger } from '@/services/logger';
 
   app.useWebSocketAdapter(new WsAdapter(app));
   app.useGlobalInterceptors(new LoggingInterceptor());
+  app.enableShutdownHooks();
+
+  installShutdownHandlers(app, {
+    onUncaught: () => {
+      try {
+        app.get(StateStore, { strict: false }).flushSync();
+      } catch {
+        /* ignore */
+      }
+    },
+  });
 
   await app.listen(env.server.port);
   logger.info(`Application is running on: ${await app.getUrl()}`);

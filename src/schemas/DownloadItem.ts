@@ -4,17 +4,18 @@ import { z } from 'zod';
 export enum DownloadStatus {
   Queued = 'queued',
   Resolving = 'resolving',
+  Suspended = 'suspended',
   Downloading = 'downloading',
   Extracting = 'extracting',
   Completed = 'completed',
   Failed = 'failed',
 }
 
-const downloadStatusSchema = z.nativeEnum(DownloadStatus);
+const downloadStatusSchema = z.enum(DownloadStatus);
 
 const downloadItemSchema = z.object({
-  url: z.string().url(),
-  metadata: z.record(z.string()).optional(),
+  url: z.url(),
+  metadata: z.record(z.string(), z.string()).optional(),
 });
 
 const downloadInfoSchema = z.object({
@@ -22,8 +23,8 @@ const downloadInfoSchema = z.object({
   size: z.number().nullable(),
 });
 
-const downloadingInfosSchema = z.object({
-  id: z.string().uuid(),
+export const downloadingInfosSchema = z.object({
+  id: z.guid(),
   status: downloadStatusSchema,
   fileName: z.string(),
   filePaths: z.array(z.string()),
@@ -34,7 +35,7 @@ const downloadingInfosSchema = z.object({
   eta: z.number().nullable(),
   error: z.string().nullable(),
   source: z.string(),
-  metadata: z.record(z.string()).optional(),
+  metadata: z.record(z.string(), z.string()).optional(),
   createdAt: z.coerce.date(),
   downloadedAt: z.coerce.date().nullable(),
   completedAt: z.coerce.date().nullable(),

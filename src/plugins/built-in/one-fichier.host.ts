@@ -4,7 +4,8 @@ import { Logger } from '@nestjs/common';
 import axios, { AxiosError, AxiosResponse } from 'axios';
 import { z } from 'zod';
 
-import { DownloadStream, FileInfo, HostPlugin } from '@/plugins/host-plugin';
+import { FileInfo, HostPlugin, ResolvedSource } from '@/plugins/host-plugin';
+import { DownloadItem } from '@/schemas/DownloadItem';
 
 export const oneFichierConfigSchema = z.object({
   host: z.string().trim().min(1),
@@ -117,7 +118,8 @@ export class OneFichierHostPlugin implements HostPlugin {
   constructor(private readonly config: OneFichierConfig) {
     this.isPremium = !!config.apiKey;
     const escapedHost = config.host.replace(/\./g, '\\.');
-    this.urlPattern = `https?://[\\w.-]*${escapedHost}/\\?\\w+`;
+    // Share URLs (https://1fichier.com/?id) OR direct mirror URLs (https://a-10.1fichier.com/path).
+    this.urlPattern = `https?://(?:[\\w.-]+\\.)?${escapedHost}/\\?\\w+|https?://[\\w-]+\\.${escapedHost}/\\w+`;
     this.urlRegex = new RegExp(this.urlPattern);
     this.logger.log(`1Fichier plugin initialized in ${this.isPremium ? 'premium' : 'free'} mode`);
   }
@@ -126,14 +128,57 @@ export class OneFichierHostPlugin implements HostPlugin {
     return this.urlRegex.test(url);
   }
 
-  async getFileInfo(url: string): Promise<FileInfo> {
-    this.logger.log(`Getting file info for ${url}`);
+  async resolve(item: DownloadItem): Promise<ResolvedSource> {
+    const url = item.url;
+    const clean = cleanUrl(url);
 
+    if (this.isDirectUrl(clean)) {
+      this.logger.log(`Resolving ${url} (direct mirror, streaming as-is)`);
+      const infos = await this.fetchDirectFileInfo(clean);
+      return {
+        infos,
+        open: async () => {
+          const response = await axios.get(clean, { responseType: 'stream' });
+          return response.data as Readable;
+        },
+      };
+    }
+
+    this.logger.log(`Resolving ${url} (${this.isPremium ? 'premium' : 'free'} mode)`);
+    const infos = await this.fetchFileInfo(clean);
+    return {
+      infos,
+      open: async () => this.openStream(clean),
+    };
+  }
+
+  private isDirectUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      const host = this.config.host;
+      return parsed.hostname !== host && parsed.hostname.endsWith(`.${host}`) && parsed.pathname.length > 1;
+    } catch {
+      return false;
+    }
+  }
+
+  private async fetchDirectFileInfo(url: string): Promise<FileInfo> {
+    try {
+      const response = await axios.head(url);
+      const fileName = getFileName(response) || (url.split('/').pop() ?? '') || 'unknown';
+      return { fileName, size: getContentLength(response) };
+    } catch (error) {
+      this.logger.warn(`HEAD failed on direct URL: ${error instanceof Error ? error.message : error}`);
+      return { fileName: url.split('/').pop() || 'unknown', size: null };
+    }
+  }
+
+  private async fetchFileInfo(url: string): Promise<FileInfo> {
     if (this.isPremium) {
       try {
         const response = await axios.post(
           `https://api.${this.config.host}/v1/file/info.cgi`,
-          { url: cleanUrl(url) },
+          { url },
           {
             headers: {
               Authorization: `Bearer ${this.config.apiKey}`,
@@ -154,11 +199,11 @@ export class OneFichierHostPlugin implements HostPlugin {
       }
     }
 
-    return this.getFileInfoFromPage(url);
+    return this.fetchFileInfoFromPage(url);
   }
 
-  private async getFileInfoFromPage(url: string): Promise<FileInfo> {
-    const response = await axios.get(cleanUrl(url), { headers: WEB_HEADERS });
+  private async fetchFileInfoFromPage(url: string): Promise<FileInfo> {
+    const response = await axios.get(url, { headers: WEB_HEADERS });
     const html = response.data as string;
     detectErrors(html);
 
@@ -175,21 +220,19 @@ export class OneFichierHostPlugin implements HostPlugin {
     return { fileName, size };
   }
 
-  async download(url: string): Promise<DownloadStream> {
-    this.logger.log(`Resolving ${url} (${this.isPremium ? 'premium' : 'free'} mode)`);
-
+  private async openStream(url: string): Promise<Readable> {
     const downloadUrl = await this.resolveDownloadUrl(url);
     const response = await axios.get(downloadUrl, { responseType: 'stream' });
-
-    return {
-      infos: { fileName: getFileName(response), size: getContentLength(response) },
-      stream: response.data as Readable,
-    };
+    const fileName = getFileName(response);
+    const size = getContentLength(response);
+    if (fileName || size) {
+      this.logger.debug(`Stream opened: ${fileName} (${size} bytes)`);
+    }
+    return response.data as Readable;
   }
 
   private async resolveDownloadUrl(url: string): Promise<string> {
-    const clean = cleanUrl(url);
-    return this.isPremium ? this.resolveDownloadUrlPremium(clean) : this.resolveDownloadUrlFree(clean);
+    return this.isPremium ? this.resolveDownloadUrlPremium(url) : this.resolveDownloadUrlFree(url);
   }
 
   private async resolveDownloadUrlPremium(url: string): Promise<string> {
@@ -220,24 +263,21 @@ export class OneFichierHostPlugin implements HostPlugin {
   }
 
   private async resolveDownloadUrlFree(url: string): Promise<string> {
-    const clean = cleanUrl(url);
-    const pageResponse = await axios
-      .get(clean, { headers: WEB_HEADERS, maxRedirects: 0 })
-      .catch((error: AxiosError) => {
-        if (error.response?.status === 404) {
-          throw new OneFichierError('File not found on 1fichier');
-        }
-        if (error.response?.status === 503) {
-          throw new OneFichierError('1fichier is under maintenance', 20 * 60 * 1000);
-        }
-        throw error;
-      });
+    const pageResponse = await axios.get(url, { headers: WEB_HEADERS, maxRedirects: 0 }).catch((error: AxiosError) => {
+      if (error.response?.status === 404) {
+        throw new OneFichierError('File not found on 1fichier');
+      }
+      if (error.response?.status === 503) {
+        throw new OneFichierError('1fichier is under maintenance', 20 * 60 * 1000);
+      }
+      throw error;
+    });
 
     detectErrors(pageResponse.data as string);
     this.logger.debug('Waiting for free download timer...');
     await sleep(FREE_DOWNLOAD_WAIT_MS);
 
-    const postResponse = await axios.post(clean, '', {
+    const postResponse = await axios.post(url, '', {
       headers: { ...WEB_HEADERS, 'Content-Type': 'application/x-www-form-urlencoded' },
     });
 
