@@ -13,10 +13,14 @@ export enum DownloadStatus {
 
 const downloadStatusSchema = z.enum(DownloadStatus);
 
+const metadataSchema = z.record(z.string(), z.string());
+
 const downloadItemSchema = z.object({
   url: z.url(),
-  metadata: z.record(z.string(), z.string()).optional(),
+  metadata: metadataSchema.optional(),
 });
+
+const downloadMetadataSchema = z.object({ metadata: metadataSchema });
 
 const downloadInfoSchema = z.object({
   fileName: z.string(),
@@ -42,5 +46,6 @@ export const downloadingInfosSchema = z.object({
 });
 
 export class DownloadItem extends createZodDto(downloadItemSchema) {}
+export class DownloadMetadata extends createZodDto(downloadMetadataSchema) {}
 export class DownloadInfos extends createZodDto(downloadInfoSchema) {}
 export class DownloadingInfos extends createZodDto(downloadingInfosSchema) {}

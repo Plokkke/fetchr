@@ -19,6 +19,18 @@ Every text frame follows:
 
 - `topic` is either a **global** topic (no prefix) or a **scoped** topic `<scope>::<action>`.
 - `payload` is topic-specific. Absent only for a few pure commands (still recommended to send `{}`).
+- `requestId` (optional, scoped uplink only) asks the server for an `ack` — see below.
+
+### Acknowledgements
+
+Any scoped uplink event may carry a client-chosen `requestId`. The server then answers **that client only** with a global `ack`:
+
+```json
+{ "topic": "ack", "payload": { "requestId": "<id>", "ok": true, "data": <handler result> } }
+{ "topic": "ack", "payload": { "requestId": "<id>", "ok": false, "error": "<message>" } }
+```
+
+`data` depends on the verb: `download::register` and `download::update` return the `DownloadingInfos`, the other verbs return nothing. Invalid payloads, unknown scopes and handler failures (no plugin for the URL, unknown id, …) all surface as `ok: false`. Without `requestId` nothing is sent back and failures are only logged server-side.
 
 Binary frames use a type-prefix byte. See [§ Upload binary](#upload-binary-frames).
 
@@ -27,7 +39,7 @@ Binary frames use a type-prefix byte. See [§ Upload binary](#upload-binary-fram
 | Scope | Role | Subscribable | Client uplink |
 |---|---|---|---|
 | *(global)* | Transport | — | `subscribe`, `unsubscribe` |
-| `download` | Download lifecycle | yes | `register`, `cancel`, `suspend`, `resume`, `remove`, `clear` |
+| `download` | Download lifecycle | yes | `register`, `cancel`, `suspend`, `resume`, `remove`, `clear`, `update` |
 | `settings` | Server capabilities | yes (snapshot only) | — |
 | `upload` | Binary data-plane for `fetchr-push://…` URLs | no (unicast) | `error` (+ binary chunks) |
 
@@ -74,6 +86,8 @@ Create a download.
 }
 ```
 
+A URL already registered and not Failed is **not** downloaded twice: the existing item is returned (in the `ack`) and no `download::registered` is emitted.
+
 Special form for push uploads: `url: "fetchr-push://<uuid>"`, `metadata.fileName`, `metadata.size` (stringified int). The client must have the same WS connection open since the upload data-plane unicasts back through it.
 
 ### Uplink — `cancel`
@@ -101,6 +115,14 @@ Stops an in-flight download, deletes the partial file, broadcasts `download::can
 
 Removes a finished (Completed / Failed) item from the registry. Broadcasts `download::removed`.
 
+### Uplink — `update`
+
+```json
+{ "topic": "download::update", "payload": { "id": "<downloadId>", "metadata": { "imdbid": "tt7654321" } } }
+```
+
+Replaces the metadata of a not-yet-completed item (Queued / Resolving / Suspended / Downloading / Extracting / Failed). The `download::completed` event then carries the new metadata. Broadcasts `download::updated`; unknown or Completed ids are ignored with a server-side warning. Also exposed as `PATCH /downloads/:id/metadata` with body `{ "metadata": {...} }`.
+
 ### Uplink — `clear`
 
 ```json
@@ -111,16 +133,19 @@ Remove all Completed and Failed items. Broadcasts N × `download::removed`.
 
 ### Downlink events (broadcast)
 
+Every event below carries the item's `metadata` (absent when none was set), so a listener can key its behaviour on what the download is for rather than on its file.
+
 | Topic | Payload shape | When |
 |---|---|---|
 | `download::registered` | `DownloadingInfos` | After `engine.download()` creates the item |
-| `download::progress` | `{ id, status, fileName, progress, speed, eta, downloaded }` | Throttled every 500 ms during Resolving/Downloading/Extracting |
-| `download::suspended` | `{ id, status, fileName, size }` | Status → Suspended (auto, waiting for a slot) |
-| `download::resumed` | `{ id, status, fileName, size }` | *(not emitted yet, reserved)* |
+| `download::progress` | `{ id, status, fileName, progress, speed, eta, downloaded, metadata }` | Throttled every 500 ms during Resolving/Downloading/Extracting |
+| `download::suspended` | `{ id, status, fileName, size, metadata }` | Status → Suspended (auto, waiting for a slot) |
+| `download::resumed` | `{ id, status, fileName, size, metadata }` | *(not emitted yet, reserved)* |
 | `download::completed` | `{ id, fileName, filePaths, size, source, metadata, downloadedAt, completedAt }` | Status → Completed |
-| `download::failed` | `{ id, fileName, error, source }` | Status → Failed |
-| `download::canceled` | `{ id }` | User `cancel` verb succeeded |
-| `download::removed` | `{ id }` | User `remove`/`clear` succeeded |
+| `download::failed` | `{ id, fileName, error, source, metadata }` | Status → Failed |
+| `download::canceled` | `{ id, metadata }` | User `cancel` verb succeeded |
+| `download::removed` | `{ id, metadata }` | User `remove`/`clear` succeeded |
+| `download::updated` | `{ id, metadata }` | User `update` verb succeeded |
 
 ### Downlink snapshot
 
@@ -203,7 +228,7 @@ Backpressure is the client's responsibility: check `ws.bufferedAmount` (browsers
 C → S  { "topic": "subscribe", "payload": {
            "topics": ["download::list", "download::registered", "download::progress",
                       "download::completed", "download::failed", "download::canceled",
-                      "download::removed", "settings::plugins"]
+                      "download::removed", "download::updated", "settings::plugins"]
          } }
 S → C  { "topic": "download::list",    "payload": [ ... ] }       # snapshot
 S → C  { "topic": "settings::plugins", "payload": { ... } }        # snapshot

@@ -1,9 +1,21 @@
-import { Body, Controller, Delete, Get, NotFoundException, Param, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ConflictException,
+  Delete,
+  Get,
+  NotFoundException,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 
 import { MatchingHeaders } from '@/decorators/MatchingHeaders';
 import { MatchingHeadersGuard } from '@/guards/MatchingHeaderGuard';
 import { FileInfo } from '@/plugins/host-plugin';
-import { DownloadingInfos, DownloadItem, DownloadStatus } from '@/schemas/DownloadItem';
+import { DownloadingInfos, DownloadItem, DownloadMetadata, DownloadStatus } from '@/schemas/DownloadItem';
 import { DownloadEngine } from '@/services/download-engine';
 
 @Controller('/downloads')
@@ -40,6 +52,16 @@ export class DownloadController {
       throw new NotFoundException();
     }
     return item;
+  }
+
+  @Patch('/:id/metadata')
+  updateMetadata(@Param('id') id: string, @Body() body: DownloadMetadata): DownloadingInfos {
+    this.getDownload(id);
+    const updated = this.engine.updateMetadata(id, body.metadata);
+    if (!updated) {
+      throw new ConflictException('metadata of a completed download cannot be changed');
+    }
+    return updated;
   }
 
   @Delete('/:id')

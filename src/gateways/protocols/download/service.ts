@@ -34,10 +34,10 @@ export class DownloadGateway extends Gateway<DownloadClientEvent> implements OnM
   ) {
     super();
     this.eventHandlers = {
-      [DownloadClientTopic.Register]: async (client, payload) => {
+      [DownloadClientTopic.Register]: (client, payload) => {
         const channel = this.uploads.channelFor(client);
         const ctx = new WsRequestContext(channel);
-        await this.engine.download({ url: payload.url, metadata: payload.metadata }, ctx);
+        return this.engine.download({ url: payload.url, metadata: payload.metadata }, ctx);
       },
       [DownloadClientTopic.Cancel]: (_client, payload) => {
         this.engine.cancel(payload.id);
@@ -47,6 +47,13 @@ export class DownloadGateway extends Gateway<DownloadClientEvent> implements OnM
       },
       [DownloadClientTopic.Clear]: () => {
         this.engine.clearCompleted();
+      },
+      [DownloadClientTopic.Update]: (_client, payload) => {
+        const updated = this.engine.updateMetadata(payload.id, payload.metadata);
+        if (!updated) {
+          throw new Error(`Download ${payload.id} is unknown or already completed`);
+        }
+        return updated;
       },
       [DownloadClientTopic.Suspend]: (_client, payload) => {
         this.logger.warn(`suspend ${payload.id} — not implemented`);
@@ -78,6 +85,7 @@ export class DownloadGateway extends Gateway<DownloadClientEvent> implements OnM
     this.events.on(DownloadServerTopic.Failed, (p) => this.transport.broadcast(DownloadServerTopic.Failed, p));
     this.events.on(DownloadServerTopic.Canceled, (p) => this.transport.broadcast(DownloadServerTopic.Canceled, p));
     this.events.on(DownloadServerTopic.Removed, (p) => this.transport.broadcast(DownloadServerTopic.Removed, p));
+    this.events.on(DownloadServerTopic.Updated, (p) => this.transport.broadcast(DownloadServerTopic.Updated, p));
 
     this.events.on(DownloadServerTopic.Progress, (p) => {
       this.pendingProgress.set(p.id, p);

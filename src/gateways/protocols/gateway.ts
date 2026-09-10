@@ -18,11 +18,11 @@ export interface Transport {
   unicast(client: WsClient, topic: string, payload: unknown): void;
 }
 
-/** Handler for a single topic `K` of the event union `E`. */
+/** Handler for a single topic `K` of the event union `E`. Its return value is echoed in the `ack`. */
 export type Handler<E extends Envelope, K extends E['topic']> = (
   client: WsClient,
   payload: Extract<E, { topic: K }>['payload'],
-) => void | Promise<void>;
+) => unknown | Promise<unknown>;
 
 /** Exhaustive handler map — one handler per topic in `E`. */
 export type HandlerMap<E extends Envelope> = {
@@ -49,7 +49,8 @@ export interface IGateway {
   /** Clients currently subscribed to `<scope>::<topic>` in this gateway. */
   subscribersOf(topic: string): ReadonlySet<WsClient>;
 
-  onTextEvent?(client: WsClient, envelope: Envelope): Promise<void> | void;
+  /** Handles one uplink event; resolves with the handler result, rejects on invalid payload or failure. */
+  onTextEvent?(client: WsClient, envelope: Envelope): Promise<unknown>;
   onBinaryEvent?(client: WsClient, buf: Buffer): void;
 }
 
@@ -94,19 +95,18 @@ export abstract class Gateway<E extends Envelope = never> implements IGateway {
 
   // ─────────────── client-event dispatch (uplink) ───────────────
 
-  async onTextEvent(client: WsClient, envelope: Envelope): Promise<void> {
+  async onTextEvent(client: WsClient, envelope: Envelope): Promise<unknown> {
     if (!this.eventSchema || !this.eventHandlers) {
-      return;
+      throw new Error(`${this.constructor.name} accepts no client events`);
     }
     const parsed = this.eventSchema.safeParse(envelope);
     if (!parsed.success) {
-      this.logger.warn(`Invalid client event: ${parsed.error.message}`);
-      return;
+      throw new Error(`Invalid client event: ${parsed.error.message}`);
     }
     const event = <E>parsed.data;
     const handlers = <Record<string, Handler<E, E['topic']>>>(<unknown>this.eventHandlers);
     const handler = <Handler<E, typeof event.topic>>handlers[event.topic];
-    await handler(client, event.payload);
+    return handler(client, event.payload);
   }
 
   // ─────────────── subscription lifecycle ───────────────

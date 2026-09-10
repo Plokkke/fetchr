@@ -4,10 +4,14 @@ import { z } from 'zod';
  * Minimal wire envelope: every WS JSON message has shape `{ topic, payload }`.
  * The router parses this first to extract the topic, then delegates payload
  * validation to the appropriate scope's schema.
+ *
+ * A client may attach a `requestId` to a scoped uplink event; the router then
+ * answers with a global `ack` carrying that id, the outcome and the handler result.
  */
 export const envelopeSchema = z.object({
   topic: z.string(),
   payload: z.unknown().optional(),
+  requestId: z.string().min(1).max(128).optional(),
 });
 
 export type Envelope = z.infer<typeof envelopeSchema>;

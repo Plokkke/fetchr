@@ -11,6 +11,7 @@ export enum DownloadClientTopic {
   Resume = 'resume',
   Remove = 'remove',
   Clear = 'clear',
+  Update = 'update',
 }
 
 const registerPayloadSchema = z.object({
@@ -22,6 +23,7 @@ const suspendPayloadSchema = z.object({ id: z.string() });
 const resumePayloadSchema = z.object({ id: z.string() });
 const removePayloadSchema = z.object({ id: z.string() });
 const clearPayloadSchema = z.object({}).strict();
+const updatePayloadSchema = z.object({ id: z.string(), metadata: z.record(z.string(), z.string()) });
 
 export type RegisterPayload = z.infer<typeof registerPayloadSchema>;
 export type CancelPayload = z.infer<typeof cancelPayloadSchema>;
@@ -29,6 +31,7 @@ export type SuspendPayload = z.infer<typeof suspendPayloadSchema>;
 export type ResumePayload = z.infer<typeof resumePayloadSchema>;
 export type RemovePayload = z.infer<typeof removePayloadSchema>;
 export type ClearPayload = z.infer<typeof clearPayloadSchema>;
+export type UpdatePayload = z.infer<typeof updatePayloadSchema>;
 
 export const downloadClientEventSchema = z.discriminatedUnion('topic', [
   z.object({ topic: z.literal(DownloadClientTopic.Register), payload: registerPayloadSchema }),
@@ -37,6 +40,7 @@ export const downloadClientEventSchema = z.discriminatedUnion('topic', [
   z.object({ topic: z.literal(DownloadClientTopic.Resume), payload: resumePayloadSchema }),
   z.object({ topic: z.literal(DownloadClientTopic.Remove), payload: removePayloadSchema }),
   z.object({ topic: z.literal(DownloadClientTopic.Clear), payload: clearPayloadSchema }),
+  z.object({ topic: z.literal(DownloadClientTopic.Update), payload: updatePayloadSchema }),
 ]);
 
 export type DownloadClientEvent<T extends DownloadClientTopic = DownloadClientTopic> = Extract<
@@ -55,6 +59,7 @@ export enum DownloadServerTopic {
   Failed = 'failed',
   Canceled = 'canceled',
   Removed = 'removed',
+  Updated = 'updated',
   List = 'list',
 }
 
@@ -68,12 +73,17 @@ export const DOWNLOAD_BROADCAST_TOPICS = [
   DownloadServerTopic.Failed,
   DownloadServerTopic.Canceled,
   DownloadServerTopic.Removed,
+  DownloadServerTopic.Updated,
 ] as const;
 export type DownloadBroadcastTopic = (typeof DOWNLOAD_BROADCAST_TOPICS)[number];
 
 /** Topics that send a one-shot snapshot when the client subscribes to them. */
 export const DOWNLOAD_SNAPSHOT_TOPICS = [DownloadServerTopic.List] as const;
 export type DownloadSnapshotTopic = (typeof DOWNLOAD_SNAPSHOT_TOPICS)[number];
+
+// Every downlink event carries the item's metadata so listeners can react to
+// what a download *is for* (its metadata) rather than only to its file.
+const metadataField = downloadingInfosSchema.shape.metadata;
 
 const registeredPayloadSchema = downloadingInfosSchema;
 const progressPayloadSchema = z.object({
@@ -84,18 +94,21 @@ const progressPayloadSchema = z.object({
   speed: z.number(),
   eta: z.number().nullable(),
   downloaded: z.number(),
+  metadata: metadataField,
 });
 const suspendedPayloadSchema = downloadingInfosSchema.pick({
   id: true,
   status: true,
   fileName: true,
   size: true,
+  metadata: true,
 });
 const resumedPayloadSchema = downloadingInfosSchema.pick({
   id: true,
   status: true,
   fileName: true,
   size: true,
+  metadata: true,
 });
 const completedPayloadSchema = downloadingInfosSchema.pick({
   id: true,
@@ -112,9 +125,11 @@ const failedPayloadSchema = downloadingInfosSchema.pick({
   fileName: true,
   error: true,
   source: true,
+  metadata: true,
 });
-const canceledPayloadSchema = z.object({ id: z.string() });
-const removedPayloadSchema = z.object({ id: z.string() });
+const canceledPayloadSchema = z.object({ id: z.string(), metadata: metadataField });
+const removedPayloadSchema = z.object({ id: z.string(), metadata: metadataField });
+const updatedPayloadSchema = downloadingInfosSchema.pick({ id: true, metadata: true });
 const listPayloadSchema = z.array(downloadingInfosSchema);
 
 export type RegisteredPayload = z.infer<typeof registeredPayloadSchema>;
@@ -125,6 +140,7 @@ export type CompletedPayload = z.infer<typeof completedPayloadSchema>;
 export type FailedPayload = z.infer<typeof failedPayloadSchema>;
 export type CanceledPayload = z.infer<typeof canceledPayloadSchema>;
 export type RemovedPayload = z.infer<typeof removedPayloadSchema>;
+export type UpdatedPayload = z.infer<typeof updatedPayloadSchema>;
 export type ListPayload = z.infer<typeof listPayloadSchema>;
 
 export const downloadServerEventSchema = z.discriminatedUnion('topic', [
@@ -136,6 +152,7 @@ export const downloadServerEventSchema = z.discriminatedUnion('topic', [
   z.object({ topic: z.literal(DownloadServerTopic.Failed), payload: failedPayloadSchema }),
   z.object({ topic: z.literal(DownloadServerTopic.Canceled), payload: canceledPayloadSchema }),
   z.object({ topic: z.literal(DownloadServerTopic.Removed), payload: removedPayloadSchema }),
+  z.object({ topic: z.literal(DownloadServerTopic.Updated), payload: updatedPayloadSchema }),
   z.object({ topic: z.literal(DownloadServerTopic.List), payload: listPayloadSchema }),
 ]);
 

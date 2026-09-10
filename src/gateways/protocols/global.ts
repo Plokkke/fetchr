@@ -7,7 +7,12 @@ import { z } from 'zod';
 export enum GlobalTopic {
   Subscribe = 'subscribe',
   Unsubscribe = 'unsubscribe',
+  /** Server → client answer to an uplink event that carried a `requestId`. */
+  Ack = 'ack',
 }
+
+export type AckOutcome = { ok: true; data?: unknown } | { ok: false; error: string };
+export type AckPayload = AckOutcome & { requestId: string };
 
 const subscribePayloadSchema = z.object({ topics: z.array(z.string()) });
 const unsubscribePayloadSchema = z.object({ topics: z.array(z.string()) });

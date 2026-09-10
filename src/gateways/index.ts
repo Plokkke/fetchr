@@ -8,6 +8,8 @@ import type { Server } from 'ws';
 import { Config } from '@/app.module';
 
 import {
+  AckOutcome,
+  AckPayload,
   Scope,
   envelopeSchema,
   globalClientEventSchema,
@@ -136,19 +138,38 @@ export class GlobalGateway implements OnGatewayConnection, OnGatewayDisconnect, 
       return;
     }
 
-    const { topic, payload } = envelope.data;
+    const { topic, payload, requestId } = envelope.data;
 
     const split = parseScope(topic);
-    if (split.scope) {
-      const service = this.services.get(split.scope as Scope);
-      if (!service) {
-        this.logger.warn(`No service registered for scope "${split.scope}"`);
-        return;
-      }
-      await service.onTextEvent?.(client, { topic: split.topic, payload });
-    } else {
+    if (!split.scope) {
       this.dispatchGlobal(client, json);
+      return;
     }
+
+    const service = this.services.get(split.scope as Scope);
+    if (!service?.onTextEvent) {
+      this.logger.warn(`No service registered for scope "${split.scope}"`);
+      this.ack(client, requestId, { ok: false, error: `Unknown scope "${split.scope}"` });
+      return;
+    }
+
+    try {
+      const data = await service.onTextEvent(client, { topic: split.topic, payload });
+      this.ack(client, requestId, { ok: true, data });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`${topic} failed: ${error}`);
+      this.ack(client, requestId, { ok: false, error });
+    }
+  }
+
+  /** Answers an uplink event that carried a `requestId`; silent otherwise. */
+  private ack(client: Client, requestId: string | undefined, outcome: AckOutcome): void {
+    if (!requestId) {
+      return;
+    }
+    const payload: AckPayload = { requestId, ...outcome };
+    this.send(client, JSON.stringify({ topic: GlobalTopic.Ack, payload }));
   }
 
   private handleBinary(client: Client, buf: Buffer): void {

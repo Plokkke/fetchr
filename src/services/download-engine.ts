@@ -119,6 +119,7 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
           fileName: infos.fileName,
           error: infos.error,
           source: infos.source,
+          metadata: infos.metadata,
         });
         continue;
       }
@@ -189,8 +190,28 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     }
 
     this.items = this.items.filter((d) => d.infos.id !== id);
-    this.eventEmitter.emit(DownloadServerTopic.Removed, { id });
+    this.eventEmitter.emit(DownloadServerTopic.Removed, { id, metadata: item.infos.metadata });
     this.stateStore.scheduleFlush();
+  }
+
+  /**
+   * Replaces the metadata of a download that has not completed yet, so the
+   * `completed` event carries what the consumer decided after registration.
+   */
+  updateMetadata(id: string, metadata: Record<string, string>): DownloadingInfos | undefined {
+    const item = this.items.find((d) => d.infos.id === id);
+    if (!item || item.infos.status === DownloadStatus.Completed) {
+      return undefined;
+    }
+
+    item.item.metadata = metadata;
+    item.infos.metadata = metadata;
+    this.logger.log(
+      `Metadata replaced on ${item.infos.fileName || item.item.url}: ${Object.keys(metadata).join(', ') || '(empty)'}`,
+    );
+    this.eventEmitter.emit(DownloadServerTopic.Updated, { id, metadata });
+    this.stateStore.scheduleFlush();
+    return item.infos;
   }
 
   clearCompleted(): number {
@@ -200,7 +221,7 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     this.items = this.items.filter((d) => !toRemove.includes(d));
 
     for (const item of toRemove) {
-      this.eventEmitter.emit(DownloadServerTopic.Removed, { id: item.infos.id });
+      this.eventEmitter.emit(DownloadServerTopic.Removed, { id: item.infos.id, metadata: item.infos.metadata });
     }
 
     this.logger.log(`Cleared ${toRemove.length} completed/failed downloads`);
@@ -225,7 +246,7 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     }
 
     this.logger.log(`Download ${item.infos.fileName} cancelled`);
-    this.eventEmitter.emit(DownloadServerTopic.Canceled, { id: id });
+    this.eventEmitter.emit(DownloadServerTopic.Canceled, { id, metadata: item.infos.metadata });
     this.stateStore.scheduleFlush();
     this.dequeue();
   }
@@ -242,6 +263,12 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   async download(item: DownloadItem, ctx?: RequestContext): Promise<DownloadingInfos> {
+    const duplicate = this.items.find((d) => d.item.url === item.url && d.infos.status !== DownloadStatus.Failed);
+    if (duplicate) {
+      this.logger.log(`Already registered, returning existing item for ${item.url}`);
+      return duplicate.infos;
+    }
+
     const plugin = this.registry.findHostFor(item.url);
     if (!plugin) {
       throw new Error(`No plugin found for URL: ${item.url}`);
@@ -311,6 +338,7 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
         status: active.infos.status,
         fileName: active.infos.fileName,
         size: active.infos.size,
+        metadata: active.infos.metadata,
       });
       this.tickDownloads();
     } catch (error) {
@@ -435,6 +463,7 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
       speed: active.infos.speed,
       eta: active.infos.eta,
       downloaded: active.infos.downloaded,
+      metadata: active.infos.metadata,
     });
   }
 
@@ -451,6 +480,7 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
       fileName: active.infos.fileName,
       error: active.infos.error,
       source: active.infos.source,
+      metadata: active.infos.metadata,
     });
 
     void this.stateStore.flushNow();
