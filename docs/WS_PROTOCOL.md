@@ -5,7 +5,7 @@ Single WebSocket endpoint at the root (`/`). All interactions — control, event
 ## Connection
 
 - **URL**: `ws://<host>:<port>/` or `wss://...` behind TLS/reverse proxy
-- **Auth**: header `x-api-key: <uuid>` on the HTTP upgrade handshake. Rejection closes with code `4401`.
+- **Auth**: header `x-api-key: <uuid>` on the HTTP upgrade handshake, or `?apiKey=<uuid>` on the URL for clients that cannot set upgrade headers (browsers). Rejection closes with code `4401`.
 - **Ping/pong**: server pings every 30s, client must respond or connection is terminated.
 - **Reconnect**: no server-side state beyond subscriptions. Clients reconnect and re-subscribe.
 
@@ -81,7 +81,7 @@ Create a download.
   "topic": "download::register",
   "payload": {
     "url": "https://1fichier.com/?abc",
-    "metadata": { "imdb": "tt1234567" }
+    "metadata": { "ref": "abc-123" }
   }
 }
 ```
@@ -105,7 +105,7 @@ Stops an in-flight download, deletes the partial file, broadcasts `download::can
 { "topic": "download::resume",  "payload": { "id": "<downloadId>" } }
 ```
 
-> Currently stubbed server-side (no-op + warn). To be wired to `engine.suspend/resume`.
+`suspend` pauses a Queued / Resolving / Suspended / Downloading item: its stream is closed, the partial file stays on disk and the item is skipped by the scheduler until `resume`. Extracting items cannot be paused. Broadcasts `download::suspended` (with `paused: true` in the snapshot). `resume` clears the pause and broadcasts `download::resumed`; the download then continues from the partial file (see *Resumable downloads*). Both answer their `ack` with the `DownloadingInfos`, or an error when the item is unknown or not in a suitable state. Also exposed as `POST /downloads/:id/suspend` and `POST /downloads/:id/resume`.
 
 ### Uplink — `remove`
 
@@ -118,7 +118,7 @@ Removes a finished (Completed / Failed) item from the registry. Broadcasts `down
 ### Uplink — `update`
 
 ```json
-{ "topic": "download::update", "payload": { "id": "<downloadId>", "metadata": { "imdbid": "tt7654321" } } }
+{ "topic": "download::update", "payload": { "id": "<downloadId>", "metadata": { "ref": "abc-456" } } }
 ```
 
 Replaces the metadata of a not-yet-completed item (Queued / Resolving / Suspended / Downloading / Extracting / Failed). The `download::completed` event then carries the new metadata. Broadcasts `download::updated`; unknown or Completed ids are ignored with a server-side warning. Also exposed as `PATCH /downloads/:id/metadata` with body `{ "metadata": {...} }`.
@@ -139,8 +139,8 @@ Every event below carries the item's `metadata` (absent when none was set), so a
 |---|---|---|
 | `download::registered` | `DownloadingInfos` | After `engine.download()` creates the item |
 | `download::progress` | `{ id, status, fileName, progress, speed, eta, downloaded, metadata }` | Throttled every 500 ms during Resolving/Downloading/Extracting |
-| `download::suspended` | `{ id, status, fileName, size, metadata }` | Status → Suspended (auto, waiting for a slot) |
-| `download::resumed` | `{ id, status, fileName, size, metadata }` | *(not emitted yet, reserved)* |
+| `download::suspended` | `{ id, status, fileName, size, metadata }` | Status → Suspended: waiting for a slot after resolve, or paused by `suspend` |
+| `download::resumed` | `{ id, status, fileName, size, metadata }` | User `resume` verb on a paused item |
 | `download::completed` | `{ id, fileName, filePaths, size, source, metadata, downloadedAt, completedAt }` | Status → Completed |
 | `download::failed` | `{ id, fileName, error, source, metadata }` | Status → Failed |
 | `download::canceled` | `{ id, metadata }` | User `cancel` verb succeeded |
@@ -222,7 +222,7 @@ Header total = 29 bytes. `token` is the UUID (binary, not ASCII). For a `read { 
 
 Backpressure is the client's responsibility: check `ws.bufferedAmount` (browsers) or the equivalent in Node, pause before pushing the next chunk if it's above a threshold (suggested 16 MB).
 
-## Example: grab (download management)
+## Example: download management
 
 ```text
 C → S  { "topic": "subscribe", "payload": {
@@ -234,7 +234,7 @@ S → C  { "topic": "download::list",    "payload": [ ... ] }       # snapshot
 S → C  { "topic": "settings::plugins", "payload": { ... } }        # snapshot
 
 C → S  { "topic": "download::register",
-         "payload": { "url": "https://1fichier.com/?abc", "metadata": {"imdb":"tt1"} } }
+         "payload": { "url": "https://1fichier.com/?abc", "metadata": {"ref":"abc-123"} } }
 S → *  { "topic": "download::registered", "payload": { "id": "<uid>", ... } }   # broadcast
 S → *  { "topic": "download::progress",   "payload": { ... } }                   # every 500ms
 S → *  { "topic": "download::completed",  "payload": { ... } }
@@ -277,3 +277,15 @@ S → C  { "topic": "download::completed", "payload": { "id": "<uid>", ... } }
 - **One JSON.stringify per broadcast**: the serialized message is shared across all subscribers.
 - **Cleanup**: disconnect triggers cleanup in every scope gateway (`onDisconnected`). Subscriptions are purged in O(k) where k = topics subscribed by this client.
 - **Snapshot handlers take precedence**: when a topic has a custom snapshot handler, the default "add to subscribers" behaviour does NOT run — the handler decides. To opt into both snapshot + broadcasts, the handler calls the internal `registerSubscriber(client, topic)` helper (see `protocols/download/service.ts`).
+
+## Resumable downloads
+
+Fetchr writes every download to `<fileName>.part` and renames it once the byte count matches the announced size. The partial file is the only checkpoint: nothing about the write position is persisted separately, so state and data cannot drift apart.
+
+Whenever a stream is (re)opened and a partial exists, the engine:
+
+1. asks the host for the last `1 MiB` again (`Range: bytes=<size-1MiB>-`, plus `If-Range: <etag>` when one was recorded);
+2. requires a `206` starting exactly there — a `200` (host ignored the range, or the file changed) restarts from 0;
+3. compares the bytes received with the local tail before appending anything. A mismatch (a corrupted tail, another file) discards the partial and restarts from 0.
+
+The same check runs on a leftover complete file, on a paused item resumed by the user, and on every non-terminal item found in the state file at startup (up to 3 restarts; paused items do not count). A download that ends short of its announced size is marked Failed and keeps its `.part` so re-registering the URL resumes it. `DownloadingInfos` exposes `etag`, `checksum` (when the host advertises one) and `paused`.

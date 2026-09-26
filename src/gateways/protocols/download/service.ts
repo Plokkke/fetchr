@@ -56,10 +56,18 @@ export class DownloadGateway extends Gateway<DownloadClientEvent> implements OnM
         return updated;
       },
       [DownloadClientTopic.Suspend]: (_client, payload) => {
-        this.logger.warn(`suspend ${payload.id} — not implemented`);
+        const suspended = this.engine.suspend(payload.id);
+        if (!suspended) {
+          throw new Error(`Download ${payload.id} is unknown, finished, extracting or already paused`);
+        }
+        return suspended;
       },
       [DownloadClientTopic.Resume]: (_client, payload) => {
-        this.logger.warn(`resume ${payload.id} — not implemented`);
+        const resumed = this.engine.resume(payload.id);
+        if (!resumed) {
+          throw new Error(`Download ${payload.id} is unknown or not paused`);
+        }
+        return resumed;
       },
     };
     this.subscriptionHandlers = {

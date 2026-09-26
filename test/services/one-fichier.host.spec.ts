@@ -39,19 +39,19 @@ describe('OneFichierHostPlugin', () => {
         .spyOn(axios, 'post')
         .mockResolvedValueOnce(response({ filename: 'Movie.mkv', size: 42 }))
         .mockResolvedValueOnce(response({ status: 'OK', url: 'https://cdn.test/movie' }));
-      const get = jest.spyOn(axios, 'get').mockResolvedValue(response('stream-body'));
+      const get = jest.spyOn(axios, 'get').mockResolvedValue(response('stream-body', { etag: '"e1"' }));
 
       const resolved = await plugin.resolve({ url: `${SHARE_URL}&af=99` });
-      const stream = await resolved.open();
+      const opened = await resolved.open({ from: 0 });
 
-      expect(resolved.infos).toEqual({ fileName: 'Movie.mkv', size: 42 });
+      expect(resolved.infos).toEqual({ fileName: 'Movie.mkv', size: 42, checksum: null });
       expect(post).toHaveBeenCalledWith(
         `https://api.${HOST}/v1/file/info.cgi`,
         { url: SHARE_URL },
         expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer key' }) }),
       );
-      expect(get).toHaveBeenCalledWith('https://cdn.test/movie', { responseType: 'stream' });
-      expect(stream).toBe('stream-body');
+      expect(get).toHaveBeenCalledWith('https://cdn.test/movie', expect.objectContaining({ responseType: 'stream' }));
+      expect(opened).toEqual({ stream: 'stream-body', from: 0, etag: '"e1"' });
     });
 
     it('surfaces an access denial with a retry delay', async () => {
@@ -61,7 +61,7 @@ describe('OneFichierHostPlugin', () => {
         .mockRejectedValueOnce(axiosError(403, { message: 'Bad token' }));
 
       const resolved = await plugin.resolve({ url: SHARE_URL });
-      const error = await resolved.open().catch((e: unknown) => e);
+      const error = await resolved.open({ from: 0 }).catch((e: unknown) => e);
 
       expect(error).toBeInstanceOf(OneFichierError);
       expect(error).toMatchObject({ message: expect.stringContaining('Bad token'), retryAfterMs: 15 * 60 * 1000 });
@@ -75,7 +75,7 @@ describe('OneFichierHostPlugin', () => {
 
       const resolved = await plugin.resolve({ url: SHARE_URL });
 
-      await expect(resolved.open()).rejects.toThrow('Quota exceeded');
+      await expect(resolved.open({ from: 0 })).rejects.toThrow('Quota exceeded');
     });
 
     it('falls back to the share page when the API gives no filename', async () => {
@@ -123,10 +123,10 @@ describe('OneFichierHostPlugin', () => {
       const get = jest.spyOn(axios, 'get').mockResolvedValueOnce(response('stream-body'));
 
       const resolved = await plugin.resolve({ url });
-      await resolved.open();
+      await resolved.open({ from: 0 });
 
-      expect(resolved.infos).toEqual({ fileName: 'Movie.mkv', size: 1000 });
-      expect(get).toHaveBeenCalledWith(url, { responseType: 'stream' });
+      expect(resolved.infos).toEqual({ fileName: 'Movie.mkv', size: 1000, etag: null });
+      expect(get).toHaveBeenCalledWith(url, expect.objectContaining({ responseType: 'stream' }));
     });
 
     it('falls back to the last path segment when HEAD fails', async () => {

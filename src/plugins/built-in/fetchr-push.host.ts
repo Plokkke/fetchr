@@ -59,7 +59,7 @@ export class FetchrPushHostPlugin implements HostPlugin {
 
     return {
       infos: { fileName, size },
-      open: async () => this.manager.openReadStream(token),
+      open: async () => ({ stream: this.manager.openReadStream(token), from: 0 }),
       close: async () => this.manager.close(token),
     };
   }

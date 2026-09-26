@@ -19,7 +19,7 @@ type InjectedItem = {
   infos: DownloadingInfos;
   stream?: PassThrough;
   filePath: string;
-  speedSamples: never[];
+  speedSamples: { current: never[] };
   restartAttempts: number;
 };
 
@@ -45,7 +45,7 @@ function buildInfos(id: string, status: DownloadStatus, metadata?: Record<string
 
 function buildHarness() {
   const events = new DownloadEventEmitter();
-  const stateStore = { setSource: jest.fn(), scheduleFlush: jest.fn() };
+  const stateStore = { setSource: jest.fn(), scheduleFlush: jest.fn(), flushNow: jest.fn() };
   const registry = { findHostFor: jest.fn().mockReturnValue(undefined) };
   const downloadsPath = fs.mkdtempSync(path.join(os.tmpdir(), 'fetchr-engine-'));
   const engine = new DownloadEngine(
@@ -61,7 +61,7 @@ function buildHarness() {
       item: { url: `https://host.test/${id}`, metadata: extra.infos?.metadata },
       infos: buildInfos(id, status, extra.infos?.metadata),
       filePath: '',
-      speedSamples: [],
+      speedSamples: { current: [] },
       restartAttempts: 0,
       ...extra,
     };
@@ -98,13 +98,13 @@ describe('DownloadEngine registry', () => {
   describe('remove', () => {
     it('drops the item, broadcasts its metadata one last time and persists', () => {
       const { engine, inject, emitted, stateStore } = buildHarness();
-      inject('a', DownloadStatus.Completed, { infos: buildInfos('a', DownloadStatus.Completed, { imdbid: 'tt1' }) });
+      inject('a', DownloadStatus.Completed, { infos: buildInfos('a', DownloadStatus.Completed, { ref: 'a1' }) });
       const removed = emitted(DownloadServerTopic.Removed);
 
       engine.remove('a');
 
       expect(engine.list()).toEqual([]);
-      expect(removed).toHaveBeenCalledWith({ id: 'a', metadata: { imdbid: 'tt1' } });
+      expect(removed).toHaveBeenCalledWith({ id: 'a', metadata: { ref: 'a1' } });
       expect(stateStore.scheduleFlush).toHaveBeenCalled();
     });
 
@@ -147,7 +147,7 @@ describe('DownloadEngine registry', () => {
       const filePath = path.join(downloadsPath, 'partial.mkv');
       fs.writeFileSync(filePath, 'partial');
       const stream = new PassThrough();
-      const infos = buildInfos('a', DownloadStatus.Downloading, { 'crn-flix-request-id': 'r1' });
+      const infos = buildInfos('a', DownloadStatus.Downloading, { 'request-id': 'r1' });
       inject('a', DownloadStatus.Downloading, { stream, filePath, infos });
       const canceled = emitted(DownloadServerTopic.Canceled);
 
@@ -156,7 +156,7 @@ describe('DownloadEngine registry', () => {
       expect(engine.list()).toEqual([]);
       expect(stream.destroyed).toBe(true);
       expect(fs.existsSync(filePath)).toBe(false);
-      expect(canceled).toHaveBeenCalledWith({ id: 'a', metadata: { 'crn-flix-request-id': 'r1' } });
+      expect(canceled).toHaveBeenCalledWith({ id: 'a', metadata: { 'request-id': 'r1' } });
     });
 
     it('leaves completed downloads alone', () => {
@@ -196,24 +196,24 @@ describe('DownloadEngine registry', () => {
     it('replaces the metadata of a running download and broadcasts it', () => {
       const { engine, inject, emitted, stateStore } = buildHarness();
       inject('a', DownloadStatus.Downloading, {
-        infos: buildInfos('a', DownloadStatus.Downloading, { imdbid: 'tt1' }),
+        infos: buildInfos('a', DownloadStatus.Downloading, { ref: 'a1' }),
       });
       const updated = emitted(DownloadServerTopic.Updated);
 
-      const result = engine.updateMetadata('a', { imdbid: 'tt2' });
+      const result = engine.updateMetadata('a', { ref: 'a2' });
 
-      expect(result?.metadata).toEqual({ imdbid: 'tt2' });
-      expect(engine.get('a')?.metadata).toEqual({ imdbid: 'tt2' });
-      expect(updated).toHaveBeenCalledWith({ id: 'a', metadata: { imdbid: 'tt2' } });
+      expect(result?.metadata).toEqual({ ref: 'a2' });
+      expect(engine.get('a')?.metadata).toEqual({ ref: 'a2' });
+      expect(updated).toHaveBeenCalledWith({ id: 'a', metadata: { ref: 'a2' } });
       expect(stateStore.scheduleFlush).toHaveBeenCalled();
     });
 
     it('refuses once the download has completed', () => {
       const { engine, inject } = buildHarness();
-      inject('a', DownloadStatus.Completed, { infos: buildInfos('a', DownloadStatus.Completed, { imdbid: 'tt1' }) });
+      inject('a', DownloadStatus.Completed, { infos: buildInfos('a', DownloadStatus.Completed, { ref: 'a1' }) });
 
-      expect(engine.updateMetadata('a', { imdbid: 'tt2' })).toBeUndefined();
-      expect(engine.get('a')?.metadata).toEqual({ imdbid: 'tt1' });
+      expect(engine.updateMetadata('a', { ref: 'a2' })).toBeUndefined();
+      expect(engine.get('a')?.metadata).toEqual({ ref: 'a1' });
     });
 
     it('ignores unknown ids', () => {

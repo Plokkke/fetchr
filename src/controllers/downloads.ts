@@ -64,6 +64,26 @@ export class DownloadController {
     return updated;
   }
 
+  @Post('/:id/suspend')
+  suspendDownload(@Param('id') id: string): DownloadingInfos {
+    this.getDownload(id);
+    const suspended = this.engine.suspend(id);
+    if (!suspended) {
+      throw new ConflictException('only a queued, resolving, waiting or downloading item can be suspended');
+    }
+    return suspended;
+  }
+
+  @Post('/:id/resume')
+  resumeDownload(@Param('id') id: string): DownloadingInfos {
+    this.getDownload(id);
+    const resumed = this.engine.resume(id);
+    if (!resumed) {
+      throw new ConflictException('only a suspended item can be resumed');
+    }
+    return resumed;
+  }
+
   @Delete('/:id')
   cancelDownload(@Param('id') id: string): { success: boolean } {
     const item = this.getDownload(id);

@@ -1,10 +1,9 @@
-import { Readable } from 'stream';
-
 import { Logger } from '@nestjs/common';
 import axios, { AxiosError, AxiosResponse } from 'axios';
 import { z } from 'zod';
 
-import { FileInfo, HostPlugin, ResolvedSource } from '@/plugins/host-plugin';
+import { FileInfo, HostPlugin, OpenedStream, OpenOptions, ResolvedSource } from '@/plugins/host-plugin';
+import { headerEtag, openHttpStream } from '@/plugins/http-range';
 import { DownloadItem } from '@/schemas/DownloadItem';
 
 export const oneFichierConfigSchema = z.object({
@@ -135,20 +134,14 @@ export class OneFichierHostPlugin implements HostPlugin {
     if (this.isDirectUrl(clean)) {
       this.logger.log(`Resolving ${url} (direct mirror, streaming as-is)`);
       const infos = await this.fetchDirectFileInfo(clean);
-      return {
-        infos,
-        open: async () => {
-          const response = await axios.get(clean, { responseType: 'stream' });
-          return response.data as Readable;
-        },
-      };
+      return { infos, open: (options) => openHttpStream(clean, options) };
     }
 
     this.logger.log(`Resolving ${url} (${this.isPremium ? 'premium' : 'free'} mode)`);
     const infos = await this.fetchFileInfo(clean);
     return {
       infos,
-      open: async () => this.openStream(clean),
+      open: (options) => this.openStream(clean, options),
     };
   }
 
@@ -166,7 +159,7 @@ export class OneFichierHostPlugin implements HostPlugin {
     try {
       const response = await axios.head(url);
       const fileName = getFileName(response) || (url.split('/').pop() ?? '') || 'unknown';
-      return { fileName, size: getContentLength(response) };
+      return { fileName, size: getContentLength(response), etag: headerEtag(response) };
     } catch (error) {
       this.logger.warn(`HEAD failed on direct URL: ${error instanceof Error ? error.message : error}`);
       return { fileName: url.split('/').pop() || 'unknown', size: null };
@@ -188,7 +181,11 @@ export class OneFichierHostPlugin implements HostPlugin {
         );
 
         if (response.data?.filename) {
-          return { fileName: response.data.filename, size: response.data.size ?? null };
+          return {
+            fileName: response.data.filename,
+            size: response.data.size ?? null,
+            checksum: response.data.checksum ?? null,
+          };
         }
 
         this.logger.warn(`API file/info: no filename in response`);
@@ -220,15 +217,11 @@ export class OneFichierHostPlugin implements HostPlugin {
     return { fileName, size };
   }
 
-  private async openStream(url: string): Promise<Readable> {
+  private async openStream(url: string, options: OpenOptions): Promise<OpenedStream> {
     const downloadUrl = await this.resolveDownloadUrl(url);
-    const response = await axios.get(downloadUrl, { responseType: 'stream' });
-    const fileName = getFileName(response);
-    const size = getContentLength(response);
-    if (fileName || size) {
-      this.logger.debug(`Stream opened: ${fileName} (${size} bytes)`);
-    }
-    return response.data as Readable;
+    const opened = await openHttpStream(downloadUrl, options);
+    this.logger.debug(`Stream opened from offset ${opened.from} (asked ${options.from})`);
+    return opened;
   }
 
   private async resolveDownloadUrl(url: string): Promise<string> {

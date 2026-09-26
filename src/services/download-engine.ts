@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import { Readable, Transform } from 'stream';
+import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 
 import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
@@ -12,22 +12,34 @@ import { ArchivePlugin } from '@/plugins/archive-plugin';
 import { FileInfo, HostPlugin, ResolvedSource } from '@/plugins/host-plugin';
 import { PluginRegistry } from '@/plugins/plugin-registry';
 import { DownloadingInfos, DownloadItem, DownloadStatus } from '@/schemas/DownloadItem';
+import { extractArchive } from '@/services/archive-extractor';
 import { DownloadEventEmitter } from '@/services/download-events';
+import { progressTracker, SpeedSample } from '@/services/download-progress';
+import { remoteChanged, resetForRequeue } from '@/services/download-restore';
 import { RequestContext } from '@/services/request-context';
-import { LiveItem, persistedToInfos, StateStore } from '@/services/state-store';
+import {
+  adoptPartial,
+  discardPartial,
+  FRESH_START,
+  openPartForWrite,
+  OverlapVerifier,
+  partPathOf,
+  planResume,
+  ResumeMismatchError,
+  ResumePlan,
+} from '@/services/resume';
+import { LiveItem, PersistedItem, persistedToInfos, StateStore } from '@/services/state-store';
 import { humanFileSize } from '@/utils';
 
 const ACTIVE_DOWNLOAD_STATUSES = [DownloadStatus.Downloading, DownloadStatus.Extracting];
+const TERMINAL_STATUSES = [DownloadStatus.Completed, DownloadStatus.Failed];
 const RESUMABLE_STATUSES = [
   DownloadStatus.Resolving,
   DownloadStatus.Suspended,
   DownloadStatus.Downloading,
   DownloadStatus.Extracting,
 ];
-const SPEED_WINDOW_MS = 5000;
 const MAX_RESTART_ATTEMPTS = 3;
-
-type SpeedSample = { timestamp: number; bytes: number };
 
 type ActiveDownload = {
   item: DownloadItem;
@@ -36,27 +48,11 @@ type ActiveDownload = {
   resolved?: ResolvedSource;
   stream?: Readable;
   filePath: string;
-  speedSamples: SpeedSample[];
+  speedSamples: { current: SpeedSample[] };
   restartAttempts: number;
+  /** Set after a failed resume so the next attempt discards the partial file. */
+  freshStart?: boolean;
 };
-
-function computeSpeed(samples: SpeedSample[]): number {
-  const now = Date.now();
-  const recent = samples.filter((s) => now - s.timestamp < SPEED_WINDOW_MS);
-  if (recent.length < 2) {
-    return 0;
-  }
-  const totalBytes = recent.reduce((sum, s) => sum + s.bytes, 0);
-  const elapsed = (now - recent[0].timestamp) / 1000;
-  return elapsed > 0 ? totalBytes / elapsed : 0;
-}
-
-function computeEta(size: number | null, downloaded: number, speed: number): number | null {
-  if (!size || speed <= 0) {
-    return null;
-  }
-  return Math.round((size - downloaded) / speed);
-}
 
 @Injectable()
 export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
@@ -80,77 +76,46 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     if (persisted.length === 0) {
       return;
     }
-
     for (const p of persisted) {
-      const infos = persistedToInfos(p.infos);
-      const restartAttempts = p.restartAttempts ?? 0;
-
-      if (infos.status === DownloadStatus.Completed || infos.status === DownloadStatus.Failed) {
-        this.items.push({
-          item: { url: p.item.url, metadata: p.item.metadata } as DownloadItem,
-          infos,
-          filePath: p.filePath,
-          speedSamples: [],
-          restartAttempts,
-        });
-        continue;
-      }
-
-      const nextAttempts = restartAttempts + 1;
-      if (nextAttempts > MAX_RESTART_ATTEMPTS) {
-        this.logger.warn(
-          `Item ${infos.id} (${infos.fileName || p.item.url}) exceeded ${MAX_RESTART_ATTEMPTS} restart-retries, marking failed`,
-        );
-        infos.status = DownloadStatus.Failed;
-        infos.error = `too many restart-retries (${nextAttempts})`;
-        infos.speed = 0;
-        infos.eta = null;
-        infos.progress = null;
-        await this.cleanupArtifacts(p.filePath, infos.fileName);
-        this.items.push({
-          item: { url: p.item.url, metadata: p.item.metadata } as DownloadItem,
-          infos,
-          filePath: p.filePath,
-          speedSamples: [],
-          restartAttempts: nextAttempts,
-        });
-        this.eventEmitter.emit(DownloadServerTopic.Failed, {
-          id: infos.id,
-          fileName: infos.fileName,
-          error: infos.error,
-          source: infos.source,
-          metadata: infos.metadata,
-        });
-        continue;
-      }
-
-      await this.cleanupArtifacts(p.filePath, infos.fileName);
-      infos.status = DownloadStatus.Queued;
-      infos.fileName = '';
-      infos.filePaths = [];
-      infos.size = null;
-      infos.downloaded = 0;
-      infos.progress = null;
-      infos.speed = 0;
-      infos.eta = null;
-      infos.error = null;
-      infos.downloadedAt = null;
-      infos.completedAt = null;
-
-      this.items.push({
-        item: { url: p.item.url, metadata: p.item.metadata } as DownloadItem,
-        infos,
-        filePath: '',
-        speedSamples: [],
-        restartAttempts: nextAttempts,
-      });
-      this.logger.log(`Re-queued ${p.item.url} (restart attempt ${nextAttempts}/${MAX_RESTART_ATTEMPTS})`);
+      this.items.push(await this.restore(p));
     }
-
     await this.stateStore.flushNow();
-
     this.tickResolves();
     this.tickDownloads();
+  }
+
+  /**
+   * Non-terminal items are re-queued with their partial file kept on disk, so
+   * the next stream resumes from it once the source has been resolved again.
+   */
+  private async restore(p: PersistedItem): Promise<ActiveDownload> {
+    const infos = persistedToInfos(p.infos);
+    const active: ActiveDownload = {
+      item: { url: p.item.url, metadata: p.item.metadata } as DownloadItem,
+      infos,
+      filePath: p.filePath,
+      speedSamples: { current: [] },
+      restartAttempts: p.restartAttempts ?? 0,
+    };
+    if (TERMINAL_STATUSES.includes(infos.status)) {
+      return active;
+    }
+
+    if (!infos.paused) {
+      active.restartAttempts += 1;
+    }
+    if (active.restartAttempts > MAX_RESTART_ATTEMPTS) {
+      await this.cleanupArtifacts(p.filePath, infos.fileName);
+      this.fail(active, `too many restart-retries (${active.restartAttempts})`, false);
+      return active;
+    }
+
+    await this.cleanupExtraction(infos.fileName);
+    resetForRequeue(infos, p.filePath ? await adoptPartial(p.filePath) : 0);
+    this.logger.log(
+      `Re-queued ${p.item.url} (restart attempt ${active.restartAttempts}/${MAX_RESTART_ATTEMPTS}, ${infos.downloaded} bytes on disk)`,
+    );
+    return active;
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -190,7 +155,7 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     }
 
     this.items = this.items.filter((d) => d.infos.id !== id);
-    this.eventEmitter.emit(DownloadServerTopic.Removed, { id, metadata: item.infos.metadata });
+    this.forget(item);
     this.stateStore.scheduleFlush();
   }
 
@@ -215,20 +180,22 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   clearCompleted(): number {
-    const toRemove = this.items.filter(
-      (d) => d.infos.status === DownloadStatus.Completed || d.infos.status === DownloadStatus.Failed,
-    );
+    const toRemove = this.items.filter((d) => TERMINAL_STATUSES.includes(d.infos.status));
     this.items = this.items.filter((d) => !toRemove.includes(d));
-
-    for (const item of toRemove) {
-      this.eventEmitter.emit(DownloadServerTopic.Removed, { id: item.infos.id, metadata: item.infos.metadata });
-    }
+    toRemove.forEach((item) => this.forget(item));
 
     this.logger.log(`Cleared ${toRemove.length} completed/failed downloads`);
     if (toRemove.length > 0) {
       this.stateStore.scheduleFlush();
     }
     return toRemove.length;
+  }
+
+  private forget(item: ActiveDownload): void {
+    if (item.infos.status === DownloadStatus.Failed && item.filePath) {
+      discardPartial(item.filePath);
+    }
+    this.eventEmitter.emit(DownloadServerTopic.Removed, { id: item.infos.id, metadata: item.infos.metadata });
   }
 
   cancel(id: string): void {
@@ -241,14 +208,52 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     void item.resolved?.close?.().catch(() => {});
     this.items = this.items.filter((d) => d.infos.id !== id);
 
-    if (item.filePath && fs.existsSync(item.filePath)) {
-      fs.unlinkSync(item.filePath);
+    if (item.filePath) {
+      discardPartial(item.filePath);
     }
 
     this.logger.log(`Download ${item.infos.fileName} cancelled`);
     this.eventEmitter.emit(DownloadServerTopic.Canceled, { id, metadata: item.infos.metadata });
     this.stateStore.scheduleFlush();
     this.dequeue();
+  }
+
+  /** Pauses a download; its partial file stays on disk and is resumed by `resume`. */
+  suspend(id: string): DownloadingInfos | undefined {
+    const item = this.items.find((d) => d.infos.id === id);
+    if (!item || item.infos.paused || ![...RESUMABLE_STATUSES, DownloadStatus.Queued].includes(item.infos.status)) {
+      return undefined;
+    }
+    if (item.infos.status === DownloadStatus.Extracting) {
+      return undefined;
+    }
+
+    item.infos.paused = true;
+    if (item.infos.status === DownloadStatus.Downloading) {
+      this.logger.log(`Suspending ${item.infos.fileName}`);
+      const stream = item.stream;
+      this.markSuspended(item);
+      stream?.destroy();
+      this.dequeue();
+    }
+    this.stateStore.scheduleFlush();
+    return item.infos;
+  }
+
+  resume(id: string): DownloadingInfos | undefined {
+    const item = this.items.find((d) => d.infos.id === id);
+    if (!item?.infos.paused) {
+      return undefined;
+    }
+
+    item.infos.paused = false;
+    this.logger.log(`Resuming ${item.infos.fileName || item.item.url}`);
+    if (item.infos.status === DownloadStatus.Suspended) {
+      this.eventEmitter.emit(DownloadServerTopic.Resumed, this.lifecyclePayload(item));
+    }
+    this.stateStore.scheduleFlush();
+    this.dequeue();
+    return item.infos;
   }
 
   async resolve(url: string): Promise<FileInfo> {
@@ -307,7 +312,7 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
         completedAt: null,
       },
       filePath: '',
-      speedSamples: [],
+      speedSamples: { current: [] },
       restartAttempts: 0,
     };
   }
@@ -325,21 +330,8 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
         return;
       }
 
-      active.resolved = resolved;
-      active.infos.fileName = resolved.infos.fileName;
-      active.infos.size = resolved.infos.size;
-      active.filePath = path.join(this.downloadsPath, resolved.infos.fileName);
-      active.infos.status = DownloadStatus.Suspended;
-
-      this.stateStore.scheduleFlush();
-      this.emitProgress(active);
-      this.eventEmitter.emit(DownloadServerTopic.Suspended, {
-        id: active.infos.id,
-        status: active.infos.status,
-        fileName: active.infos.fileName,
-        size: active.infos.size,
-        metadata: active.infos.metadata,
-      });
+      await this.adoptResolved(active, resolved);
+      this.markSuspended(active);
       this.tickDownloads();
     } catch (error) {
       if (!this.items.includes(active)) {
@@ -347,6 +339,43 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
       }
       this.fail(active, `Resolve failed for ${active.item.url}: ${error instanceof Error ? error.message : error}`);
     }
+  }
+
+  /** Records what the host reports; a partial of a file that changed remotely is dropped. */
+  private async adoptResolved(active: ActiveDownload, resolved: ResolvedSource): Promise<void> {
+    if (active.filePath && remoteChanged(active.infos, resolved.infos)) {
+      this.logger.warn(`Remote file changed for ${active.item.url}, discarding partial ${active.infos.fileName}`);
+      discardPartial(active.filePath);
+      active.infos.downloaded = 0;
+      active.infos.progress = null;
+    }
+
+    active.resolved = resolved;
+    active.infos.fileName = resolved.infos.fileName;
+    active.infos.size = resolved.infos.size;
+    active.infos.etag = resolved.infos.etag ?? active.infos.etag;
+    active.infos.checksum = resolved.infos.checksum ?? active.infos.checksum;
+    active.filePath = path.join(this.downloadsPath, resolved.infos.fileName);
+  }
+
+  private markSuspended(active: ActiveDownload): void {
+    active.infos.status = DownloadStatus.Suspended;
+    active.infos.speed = 0;
+    active.infos.eta = null;
+    active.stream = undefined;
+    this.stateStore.scheduleFlush();
+    this.emitProgress(active);
+    this.eventEmitter.emit(DownloadServerTopic.Suspended, this.lifecyclePayload(active));
+  }
+
+  private lifecyclePayload(active: ActiveDownload) {
+    return {
+      id: active.infos.id,
+      status: active.infos.status,
+      fileName: active.infos.fileName,
+      size: active.infos.size,
+      metadata: active.infos.metadata,
+    };
   }
 
   private async startStream(active: ActiveDownload): Promise<void> {
@@ -358,41 +387,76 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     active.infos.status = DownloadStatus.Downloading;
     this.stateStore.scheduleFlush();
 
+    let stream: Readable | undefined;
     try {
-      const stream = await active.resolved.open();
+      const plan = active.freshStart ? FRESH_START : await this.prepareResume(active);
+      active.freshStart = false;
+
+      const opened = await active.resolved.open({ from: plan.from, etag: active.infos.etag });
+      stream = opened.stream;
       active.stream = stream;
+      active.infos.etag = opened.etag ?? active.infos.etag;
 
-      const { value, unit } = active.infos.size ? humanFileSize(active.infos.size) : { value: NaN, unit: '' };
-      this.logger.log(`Downloading ${active.infos.fileName} (${value}${unit})`);
-      this.emitProgress(active);
+      const effective = opened.from === plan.from ? plan : FRESH_START;
+      if (effective !== plan) {
+        this.logger.warn(`Host served ${active.infos.fileName} from 0 instead of ${plan.from}, restarting`);
+      }
+      this.logStart(active, effective);
 
-      await this.pipeToFile(active, stream);
+      await this.pipeToFile(active, stream, effective);
     } catch (error) {
-      this.fail(active, `Download failed for ${active.item.url}: ${error instanceof Error ? error.message : error}`);
+      await this.handleStreamFailure(active, stream, error);
     }
   }
 
-  private async pipeToFile(active: ActiveDownload, stream: Readable): Promise<void> {
-    const tracker = new Transform({
-      transform: (chunk: Buffer, _encoding, callback) => {
-        active.infos.downloaded += chunk.length;
-        active.speedSamples.push({ timestamp: Date.now(), bytes: chunk.length });
+  private async prepareResume(active: ActiveDownload): Promise<ResumePlan> {
+    await adoptPartial(active.filePath);
+    return planResume(partPathOf(active.filePath), active.infos.size);
+  }
 
-        const now = Date.now();
-        active.speedSamples = active.speedSamples.filter((s) => now - s.timestamp < SPEED_WINDOW_MS);
+  private logStart(active: ActiveDownload, plan: ResumePlan): void {
+    const { value, unit } = active.infos.size ? humanFileSize(active.infos.size) : { value: NaN, unit: '' };
+    const resume =
+      plan.partialSize > 0 ? `, resuming at ${plan.partialSize} (verifying ${plan.expectedTail.length})` : '';
+    this.logger.log(`Downloading ${active.infos.fileName} (${value}${unit}${resume})`);
+  }
 
-        active.infos.speed = computeSpeed(active.speedSamples);
-        active.infos.eta = computeEta(active.infos.size, active.infos.downloaded, active.infos.speed);
-        if (active.infos.size) {
-          active.infos.progress = active.infos.downloaded / active.infos.size;
-        }
+  /** A failure only counts if it comes from the stream the item still owns: a cancelled, suspended or superseded stream is ignored. */
+  private async handleStreamFailure(
+    active: ActiveDownload,
+    stream: Readable | undefined,
+    error: unknown,
+  ): Promise<void> {
+    if (this.shuttingDown || !this.items.includes(active) || active.stream !== stream) {
+      return;
+    }
+    if (error instanceof ResumeMismatchError && !active.freshStart) {
+      this.logger.warn(`Resume rejected for ${active.infos.fileName}: ${error.message}. Restarting from 0`);
+      active.freshStart = true;
+      discardPartial(active.filePath);
+      await this.startStream(active);
+      return;
+    }
+    this.fail(active, `Download failed for ${active.item.url}: ${error instanceof Error ? error.message : error}`);
+  }
 
-        this.emitProgress(active);
-        callback(null, chunk);
-      },
-    });
+  private async pipeToFile(active: ActiveDownload, stream: Readable, plan: ResumePlan): Promise<void> {
+    active.infos.downloaded = plan.partialSize;
+    active.infos.progress = active.infos.size ? plan.partialSize / active.infos.size : null;
+    this.emitProgress(active);
 
-    await pipeline(stream, tracker, fs.createWriteStream(active.filePath));
+    const partPath = partPathOf(active.filePath);
+    await pipeline(
+      stream,
+      new OverlapVerifier(plan.expectedTail),
+      progressTracker(active.infos, active.speedSamples, () => this.emitProgress(active)),
+      openPartForWrite(partPath, plan),
+    );
+
+    if (active.infos.size !== null && active.infos.downloaded !== active.infos.size) {
+      throw new Error(`incomplete file: ${active.infos.downloaded} of ${active.infos.size} bytes`);
+    }
+    await fsp.rename(partPath, active.filePath);
 
     active.infos.speed = 0;
     active.infos.eta = null;
@@ -415,37 +479,18 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     active.infos.eta = null;
     this.stateStore.scheduleFlush();
     this.emitProgress(active);
-
-    const baseName = active.infos.fileName.replace(/\.[^.]+$/, '');
-    const targetDir = path.join(this.downloadsPath, baseName);
-    fs.mkdirSync(targetDir, { recursive: true });
-
     this.logger.log(`Extracting with ${archivePlugin.name}: ${active.infos.fileName}`);
 
     try {
-      const result = await archivePlugin.extract(active.filePath);
-      let bytesWritten = 0;
-      const filePaths: string[] = [];
-
-      for await (const file of result.files) {
-        const targetPath = path.join(targetDir, file.name);
-        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-
-        const progressTracker = new Transform({
-          transform: (chunk: Buffer, _encoding, callback) => {
-            bytesWritten += chunk.length;
-            if (result.totalSize > 0) {
-              active.infos.progress = bytesWritten / result.totalSize;
-              this.emitProgress(active);
-            }
-            callback(null, chunk);
-          },
-        });
-
-        await pipeline(file.stream, progressTracker, fs.createWriteStream(targetPath));
-        filePaths.push(targetPath);
-      }
-
+      const filePaths = await extractArchive(
+        archivePlugin,
+        active.filePath,
+        this.extractionDir(active.infos.fileName),
+        (ratio) => {
+          active.infos.progress = ratio;
+          this.emitProgress(active);
+        },
+      );
       fs.unlinkSync(active.filePath);
       active.infos.filePaths = filePaths;
       await this.complete(active);
@@ -467,9 +512,11 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     });
   }
 
-  private fail(active: ActiveDownload, error: string): void {
+  private fail(active: ActiveDownload, error: string, dequeue = true): void {
     active.infos.status = DownloadStatus.Failed;
     active.infos.error = error;
+    active.infos.speed = 0;
+    active.infos.eta = null;
     void active.resolved?.close?.().catch(() => {});
     active.resolved = undefined;
     active.stream = undefined;
@@ -483,8 +530,10 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
       metadata: active.infos.metadata,
     });
 
-    void this.stateStore.flushNow();
-    this.dequeue();
+    if (dequeue) {
+      void this.stateStore.flushNow();
+      this.dequeue();
+    }
   }
 
   private async complete(active: ActiveDownload): Promise<void> {
@@ -544,12 +593,12 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
       if (downloadingCount >= this.maxConcurrent) {
         return;
       }
-      const suspended = this.items.find((d) => d.infos.status === DownloadStatus.Suspended);
-      if (!suspended) {
+      const next = this.items.find((d) => d.infos.status === DownloadStatus.Suspended && !d.infos.paused);
+      if (!next) {
         return;
       }
-      this.logger.log(`Starting download for ${suspended.infos.fileName}`);
-      void this.startStream(suspended);
+      this.logger.log(`Starting download for ${next.infos.fileName}`);
+      void this.startStream(next);
     }
   }
 
@@ -562,14 +611,20 @@ export class DownloadEngine implements OnApplicationBootstrap, OnModuleDestroy {
     }));
   }
 
+  private extractionDir(fileName: string): string {
+    return path.join(this.downloadsPath, fileName.replace(/\.[^.]+$/, ''));
+  }
+
+  private async cleanupExtraction(fileName: string): Promise<void> {
+    if (fileName) {
+      await fsp.rm(this.extractionDir(fileName), { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   private async cleanupArtifacts(filePath: string, fileName: string): Promise<void> {
     if (filePath) {
-      await fsp.unlink(filePath).catch(() => {});
+      discardPartial(filePath);
     }
-    if (fileName) {
-      const baseName = fileName.replace(/\.[^.]+$/, '');
-      const extractDir = path.join(this.downloadsPath, baseName);
-      await fsp.rm(extractDir, { recursive: true, force: true }).catch(() => {});
-    }
+    await this.cleanupExtraction(fileName);
   }
 }
