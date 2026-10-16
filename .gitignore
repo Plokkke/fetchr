@@ -59,3 +59,5 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 reports/
 .stryker-tmp/
 docker-compose.yml
+# Terraform
+.terraform/

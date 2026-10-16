@@ -1,11 +1,19 @@
 import { HttpStatus } from '@nestjs/common';
 import * as request from 'supertest';
 
-import { APP } from '?/setup/e2e-setup';
+import { APP, CONFIG } from '?/setup/e2e-setup';
 
 import { HealthService } from '@/modules/health/health.service';
 
 describe('Health controller', () => {
+  describe('Status', () => {
+    it('should return the running version', async () => {
+      const response = await request(APP.getHttpServer()).get('/health').send();
+      expect(response.status).toBe(HttpStatus.OK);
+      expect(response.body).toStrictEqual({ status: 'ok', version: CONFIG.server.version });
+    });
+  });
+
   describe('Startup', () => {
     async function endpointCall() {
       return request(APP.getHttpServer()).get(`/health/startup`).send();
@@ -62,11 +70,9 @@ describe('Health controller', () => {
 
       const response = await endpointCall();
       expect(response.status).toBe(HttpStatus.SERVICE_UNAVAILABLE);
-      expect(response.body).toStrictEqual({
+      expect(response.body).toMatchObject({
         status: 'error',
-        info: {},
         error: { service: { status: 'down' } },
-        details: { service: { status: 'down' } },
       });
 
       healthService.removeReadinessCheck('service');

@@ -13,6 +13,7 @@ export const environmentVariablesSchema = z
   .object({
     LOG_LEVEL: z.string().optional(),
     PORT: z.coerce.number().optional(),
+    APP_VERSION: z.string().default('dev'),
     API_KEY: z.string(),
     DOWNLOADS_PATH: z.string(),
     MAX_CONCURRENT_DOWNLOADS: z.coerce.number().int().min(1).optional(),
@@ -24,6 +25,7 @@ export const environmentVariablesSchema = z
       port: env.PORT ?? 3000,
       apiKey: env.API_KEY,
       logLevel: env.LOG_LEVEL,
+      version: env.APP_VERSION,
     },
     downloadsPath: env.DOWNLOADS_PATH,
     maxConcurrentDownloads: env.MAX_CONCURRENT_DOWNLOADS ?? 3,

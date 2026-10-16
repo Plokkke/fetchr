@@ -21,6 +21,7 @@ export const configSchema = z.object({
   server: z.object({
     port: z.number().optional().default(3000),
     apiKey: z.guid(),
+    version: z.string(),
     logLevel: z.enum(['error', 'warn', 'info', 'verbose', 'debug', 'silly']).optional().default('info'),
   }),
   downloadsPath: z.string(),
@@ -33,7 +34,7 @@ export type Config = z.infer<typeof configSchema>;
 
 export function configureAppModule(env: EnvironmentVariables): new () => NestModule {
   @Module({
-    imports: [ConfigModule.forRoot({ load: [() => env] }), HealthModule],
+    imports: [ConfigModule.forRoot({ isGlobal: true, load: [() => env] }), HealthModule],
     controllers: [DownloadController, PluginsController],
     providers: [
       GlobalGateway,

@@ -31,6 +31,7 @@ Every call needs the API key: header `x-api-key`, or `?apiKey=` on the WebSocket
 | `DELETE /downloads/:id` | Cancel (in flight) or remove (finished) |
 | `DELETE /downloads/completed` | Clear finished items |
 | `GET /plugins` | Loaded host plugins (`name`, `urlPattern`) and archive plugins |
+| `GET /health` | Status and running version `{ status, version }` (no key) |
 | `GET /health/startup`, `/health/liveness`, `/health/readiness` | Health checks (no key) |
 
 ## Configuration
@@ -45,6 +46,7 @@ Every call needs the API key: header `x-api-key`, or `?apiKey=` on the WebSocket
 | `PORT` | no | Default `3000` |
 | `LOG_LEVEL` | no | Default `info` in production, `debug` otherwise |
 | `SHUTDOWN_TIMEOUT_MS` | no | Graceful shutdown budget |
+| `APP_VERSION` | no | Reported by `/health`; set by the image build |
 | `ONE_FICHIER_HOST`, `ONE_FICHIER_API_KEY` | with `one-fichier` | 1fichier API host and key |
 
 ## Development
@@ -72,4 +74,6 @@ A host plugin implements `HostPlugin` (`src/plugins/host-plugin.ts`): a `name`, 
 
 ## Deployment
 
-Docker image built from the `Dockerfile` (listens on `3000`). Mount a volume on `DOWNLOADS_PATH`: it holds the downloads and the state file needed to resume after a restart.
+Images: `ghcr.io/plokkke/fetchr:<version>` (`linux/amd64`, `linux/arm64`, non-root uid 1000), published by `release.yml` after semantic-release. Mount a volume on `DOWNLOADS_PATH`: it holds the downloads and the state file needed to resume after a restart.
+
+The author's own instance runs on a home server: `infrastructure/terraform` is its stack (applied by the server's deployer through `deploy.yml`), `infrastructure/secrets/production.sops.yaml` its encrypted credentials. Rollback: `gh workflow run deploy -f version=<previous>`.
