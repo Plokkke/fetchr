@@ -1,0 +1,30 @@
+# Requests a deployment; the deployer on the Raspberry Pi applies infrastructure/terraform
+# at that version and reports the status in the Deployments tab. Rollback: run it with an older version.
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to deploy (X.Y.Z); empty keeps the deployed version with the current infrastructure
+        required: false
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: false
+  push:
+    branches: [main]
+    paths: [infrastructure/**]
+
+permissions:
+  deployments: write
+  contents: read
+
+concurrency: deploy-production
+
+jobs:
+  request:
+    uses: Plokkke/ci-shared/.github/workflows/request-deploy.yml@v1
+    with:
+      version: ${{ inputs.version }}

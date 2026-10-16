@@ -1,4 +1,9 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { INestApplication } from '@nestjs/common';
+import { WsAdapter } from '@nestjs/platform-ws';
 import { Test, TestingModule } from '@nestjs/testing';
 import * as nock from 'nock';
 
@@ -11,18 +16,12 @@ export const CONFIG: EnvironmentVariables = {
     port: 3000,
     apiKey: '13e4872b-12af-4707-85d6-8b7dbcdc6878',
     logLevel: 'info',
+    version: '1.2.3',
   },
-  session: {
-    secret: 'change-this-in-production-minimum-32-characters',
-  },
-  oneFichier: {
-    host: '1fichier.com',
-    apiKey: 'uuid-1234567098a',
-  },
-  download: {
-    moviesPath: '/tmp/medias/movies',
-    showsPath: '/tmp/medias/shows',
-  },
+  downloadsPath: mkdtempSync(join(tmpdir(), 'fetchr-e2e-')),
+  maxConcurrentDownloads: 3,
+  hostPlugins: ['fetchr-push'],
+  archivePlugins: [],
 };
 
 beforeAll(async () => {
@@ -33,6 +32,7 @@ beforeAll(async () => {
     }).compile();
 
     APP = moduleFixture.createNestApplication();
+    APP.useWebSocketAdapter(new WsAdapter(APP));
 
     await APP.init();
   } catch (e) {

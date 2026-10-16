@@ -1,0 +1,6 @@
+creation_rules:
+  - path_regex: infrastructure/secrets/.*\.sops\.ya?ml$
+    age: >-
+      age1se1q09jlxkmwv984ajf5rry4tpdqqw6wa5mepgygnl6w36mvzq9yr8pgs8z0q3,
+      age1l9n5vxr0e8y3g0p9yf3t8mqvdcgpcdw6f3xrgzmce357wxsk2a3s9q4z7k,
+      age1tuv6jpzt4g6tjpdankddu8wpgde6000nrtqul3hfs6n2wmlwlf7qqf3kun
