@@ -1,6 +1,8 @@
 ARG NODE_VERSION=24.21.0
 
-FROM node:${NODE_VERSION}-alpine AS build
+# Built once on the runner's own platform: the output is plain JavaScript (no native module among the
+# production dependencies), so the target images only copy it and multi-arch builds need no emulation.
+FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
